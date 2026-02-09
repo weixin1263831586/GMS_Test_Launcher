@@ -1,0 +1,14 @@
+{
+    "ubuntu_user": "hcq",
+    "ubuntu_host": "172.16.14.233",
+    "local_server": "hcq@10.10.10.206",
+
+    "use_key_auth": false,    
+    "private_key_path": "~/.ssh/id_rsa",
+    "vnc_password": "rockchip",
+    "vpn_target": ["www.google.com"],
+
+    "suites_path": "/home/${ubuntu_user}/GMS-Suite",
+    "script_path": "/home/${ubuntu_user}/GMS-Suite/run_GMS_Test_Auto.sh",
+    "gsi_scripts": "/home/${ubuntu_user}/GMS-Suite/run_GSI_Burn.sh"
+}
