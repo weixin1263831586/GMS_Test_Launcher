@@ -13,7 +13,6 @@ import threading
 import time
 import urllib.parse
 import webbrowser
-
 import tkinter as tk
 import tkinter.simpledialog as simpledialog
 from tkinter import filedialog
@@ -35,17 +34,27 @@ def center_toplevel(window, width, height):
     """居中 Toplevel 弹窗"""
     screen_width = window.winfo_screenwidth()
     screen_height = window.winfo_screenheight()
-    x = (screen_width // 2) - (width // 2)
-    y = (screen_height // 2) - (height // 2)
+    x = (screen_width - width) // 2
+    y = (screen_height - height) // 2
     window.geometry(f"{width}x{height}+{x}+{y}")
 
 # ==================== 资源路径 ====================
+BASE_PATH = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
 def resource_path(relative_path):
-    try:
-        base_path = sys._MEIPASS
-    except AttributeError:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_path, relative_path)
+    return os.path.join(BASE_PATH, relative_path)
+
+def substitute_ubuntu_user(config):
+    ubuntu_user = config.get("ubuntu_user", "user")
+    if not ubuntu_user:
+        return config
+    updated = {}
+    for key, value in config.items():
+        if isinstance(value, str) and "${ubuntu_user}" in value:
+            updated[key] = value.replace("${ubuntu_user}", ubuntu_user)
+        else:
+            updated[key] = value
+    return updated
 
 class GmsTestGUI:
     def __init__(self, root):
@@ -94,16 +103,10 @@ class GmsTestGUI:
             if not os.path.exists(config_path):
                 self.show_error("配置错误", "未找到 config.json 文件")
                 return None
-                
+
             with open(config_path, 'r', encoding='utf-8') as f:
-                config_content = f.read()
-            config = json.loads(config_content)
-            ubuntu_user = config.get("ubuntu_user", "user")
-            if ubuntu_user:
-                for key, value in config.items():
-                    if isinstance(value, str) and "${ubuntu_user}" in value:
-                        config[key] = value.replace("${ubuntu_user}", ubuntu_user)
-            return config
+                config = json.load(f)
+            return substitute_ubuntu_user(config)
         except json.JSONDecodeError as e:
             self.show_error("配置错误", f"config.json 格式无效: {str(e)}")
             return None
@@ -164,7 +167,7 @@ class GmsTestGUI:
                 {'name': 'use_key_auth', 'label': '使用密钥认证:', 'default': 'true' if config_data.get('use_key_auth', False) else 'false', 'type': 'readonly'},
                 {'name': 'private_key_path', 'label': '私钥文件路径:', 'default': config_data.get('private_key_path', ''), 'type': 'readonly'}
             ]
-            FormDialog(self.root, "编辑配置文件(config.json)", 500, 350, fields, on_submit, gui_app=self)
+            FormDialog(self.root, "修改配置(config.json)", 500, 350, fields, on_submit, gui_app=self)
         except FileNotFoundError:
             self.show_error("配置错误", "未找到 config.json 文件")
         except json.JSONDecodeError as e:
@@ -762,13 +765,11 @@ class GmsTestGUI:
         device_host = self.config.get("device_host", "")
         if not device_host:
             return None
-        
-        if "@" in device_host:
-            username, hostname = device_host.split("@", 1)
-        else:
-            username = self.config.get("ubuntu_user", "user")
-            hostname = device_host
         try:
+            if "@" not in device_host:
+                self.show_error("格式错误", "设备主机格式应为 user@host")
+                return
+            username, hostname = device_host.split("@", 1)
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             password = self.get_password(f"请输入{username}@{hostname}的SSH密码:")
@@ -777,7 +778,14 @@ class GmsTestGUI:
             ssh.connect(hostname=hostname, username=username, password=password, timeout=10)
             return ssh
         except Exception as e:
+            error_msg = str(e).lower()
             self.log_message(f"❌ 连接设备主机失败: {e}")
+            if "unable to connect" in error_msg or "connection refused" in error_msg:
+                self.root.after(100, self.check_ssh_button_handler)
+            elif "authentication" in error_msg:
+                self.show_error("认证失败", "用户名或密码错误，请重试")
+            elif "timeout" in error_msg:
+                self.show_error("连接超时", f"连接 {hostname} 超时，请检查网络")
             return None
 
     def is_windows_host(self, ssh_connection):
@@ -1012,13 +1020,13 @@ class GmsTestGUI:
             if not win_ssh:
                 self.log_message("❌ 无法连接 Windows 设备主机")
                 return False
-            
+
             # 解除所有绑定
             self.log_message("🔓 解除所有 USB/IP 绑定...")
             stdin, stdout, stderr = win_ssh.exec_command("usbipd unbind --all", timeout=10)
             output = stdout.read().decode()
             error = stderr.read().decode()
-            
+
             if output:
                 self.log_message(f"📤 unbind 输出: {output}")
             if error:
@@ -1026,12 +1034,12 @@ class GmsTestGUI:
             win_ssh.close()
 
             ssh = self.get_ssh_connection()
-            
+
             # 先查看当前端口状态
             stdin, stdout, _ = ssh.exec_command("sudo usbip port", get_pty=True)
             port_info = stdout.read().decode()
             self.log_message(f"📌 当前 USBIP 端口状态:\n{port_info}")
-            
+
             # 断开所有端口
             import re
             ports = []
@@ -1042,7 +1050,7 @@ class GmsTestGUI:
                     if match:
                         port_num = match.group(1)
                         ports.append(port_num)
-            
+
             if ports:
                 for port in ports:
                     self.log_message(f"🗑️ Detach USBIP 端口 {port}")
@@ -1050,17 +1058,17 @@ class GmsTestGUI:
                 self.log_message(f"✅ 已断开 {len(ports)} 个 USB/IP 端口")
             else:
                 self.log_message("ℹ️ 未发现活动的 USB/IP 端口")
-            
+
             ssh.close()
 
             # 清理属性
             if hasattr(self, 'all_busids'):
                 del self.all_busids
-            
+
             self.usbip_connected = False
             self.root.after(0, lambda: self.usbip_button.config(text="📱 本地设备"))
             self.log_message("✅ 本地设备已断开")
-            
+
             # 刷新设备列表
             self.refresh_devices()
         except Exception as e:
