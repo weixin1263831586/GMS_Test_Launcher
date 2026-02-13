@@ -75,7 +75,6 @@ class GmsTestGUI:
 
         self.adb_forward_running = False
         self.usbip_connected = False
-        self.current_busid = None
         self._last_modified = None
         self._last_gsi_system_path = ""
         self._last_gsi_vendor_path = ""
@@ -210,18 +209,6 @@ class GmsTestGUI:
             return
         if hasattr(self, '_resize_timer'):
             self.root.after_cancel(self._resize_timer)
-        # self._resize_timer = self.root.after(100, self.on_window_center)
-
-    def on_window_center(self):
-        """将窗口居中到屏幕中央"""
-        self.root.update_idletasks()
-        width = self.root.winfo_width()
-        height = self.root.winfo_height()
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        x = (screen_width // 2) - (width // 2)
-        y = (screen_height // 2) - (height // 2)
-        self.root.geometry(f"+{x}+{y}")
 
     def on_window_closing(self):
         if self.test_running and not messagebox.askokcancel("退出确认", "测试正在运行，确定要退出吗？"):
@@ -312,13 +299,10 @@ class GmsTestGUI:
 
     # ==================== 界面布局 ====================
     def setup_ui(self):
-        # 主框架
-        main_frame = ttk.Frame(self.root, padding="15")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-
-        # 布局权重
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
+        main_frame = ttk.Frame(self.root, padding="15")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         main_frame.columnconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=8)
         main_frame.rowconfigure(2, weight=1)
@@ -831,19 +815,20 @@ class GmsTestGUI:
     def _start_usbip_connection(self):
         if not hasattr(self, 'all_busids'):
             self.all_busids = []
-
         device_host = self.config.get("device_host", "")
         if not device_host:
             self.show_warning("提示", "设备主机未配置")
             return False
+        self.log_message("🔌 连接本地设备...")
         try:
-            self.log_message("🔌 正在连接本地设备...")
+            usbip_connected_retry = False
             win_ssh = self.get_device_host_ssh_connection()
             if not win_ssh:
                 self.log_message("❌ SSH连接设备主机失败")
                 return False
             if not self.is_windows_host(win_ssh):
                 self.show_warning("提示", "USB/IP 本地设备目前只支持Windows系统")
+                win_ssh.close()
                 return False
 
             stdin, stdout, stderr = win_ssh.exec_command('usbipd --version', timeout=5)
@@ -851,26 +836,23 @@ class GmsTestGUI:
             error_output = stderr.read().decode().strip()
             if error_output or not version_output:
                 install_guide = (
-                    "以【管理员身份】运行 PowerShell\n\n"
+                    "以【管理员身份】运行 PowerShell 安装 usbipd\n\n"
                     "winget install dorssel.usbipd-win --source winget\n"
                 )
-                self.show_warning("usbipd安装", install_guide)
-                self.log_message(f"🔴 usbipd安装 {install_guide}\n")
+                self.show_warning("提示", install_guide)
                 win_ssh.close()
                 return False
 
             win_ssh.exec_command('taskkill /F /IM adb.exe /T', timeout=10)
-
             find_busid_cmd = r'powershell -Command "usbipd list | Select-String \"Android ADB Interface\" | ForEach-Object { ($_ -split \"\s+\")[0] }"'
             stdin, stdout, stderr = win_ssh.exec_command(find_busid_cmd, timeout=10)
             busid_list = stdout.read().decode().strip().splitlines()
             if not busid_list:
-                self.log_message("❌ 未找到 Android ADB Interface 设备")
+                self.show_warning("提示", "未找到 Android ADB Interface 设备, 请检查adb设备或手动重启adb设备")
                 win_ssh.close()
                 return False
             self.log_message(f"🔎 找到 {len(busid_list)} 个 ADB 设备: {', '.join(busid_list)}")
             self.all_busids = [busid.strip() for busid in busid_list]
-            self.current_busid = self.all_busids[0]
 
             bound_devices = []
             for busid in self.all_busids:
@@ -882,7 +864,11 @@ class GmsTestGUI:
                     bound_devices.append(busid)
                     continue
                 elif "Attached" in state_info:
-                    self.log_message(f"🟢 设备 {busid} 已是 Attached 状态")
+                    self.log_message(f"🧹 设备 {busid} 已是 Attached状态, 先 detach 再 bind")
+                    win_ssh.exec_command(f"usbipd detach --busid {busid}", timeout=15)
+                    time.sleep(1)
+                    win_ssh.exec_command(f"usbipd bind --busid {busid}", timeout=15)
+                    time.sleep(1)
                     bound_devices.append(busid)
                     continue
                 else:
@@ -916,7 +902,7 @@ class GmsTestGUI:
             if not ubuntu_ssh:
                 self.log_message("❌ 无法连接 Ubuntu 主机")
                 return False
-            self.log_message("🐧 检查 USB/IP 驱动状态...")
+            self.log_message("🐧 检查Ubuntu主机 USB/IP 驱动状态...")
             stdin, stdout, _ = ubuntu_ssh.exec_command("lsmod | grep vhci_hcd")
             if not stdout.read().decode().strip():
                 self.log_message("⚠️ vhci_hcd 未加载，尝试自动加载...")
@@ -929,25 +915,17 @@ class GmsTestGUI:
                     return False
 
             device_ip = device_host.split('@')[1]
-            self.log_message("🧹 清理旧 USB/IP 端口...")
-            
-            # 先获取初始端口状态
             stdin, stdout, stderr = ubuntu_ssh.exec_command("sudo usbip port", get_pty=True)
             initial_port_info = stdout.read().decode()
             self.log_message(f"📌 初始 USBIP 端口状态:\n{initial_port_info}")
-            
-            # 执行所有设备的 attach 命令
+
             for busid in self.all_busids:
-                self.log_message(f"🔗 正在 Attach 设备 {busid}...")
+                self.log_message(f"🔗 正在 Attach 设备 {busid}...")                
+                self._usbip_ensure_attached_on_ubuntu(ubuntu_ssh, device_ip, [busid])
                 
-                # 先尝试 detach 可能存在的旧连接
-                ubuntu_ssh.exec_command(f"sudo usbip detach -r {device_ip} -b {busid}", get_pty=True)
-                
-                # 执行 attach
                 attach_cmd = f"sudo usbip attach -r {device_ip} -b {busid}"
                 stdin, stdout, stderr = ubuntu_ssh.exec_command(attach_cmd, get_pty=True)
                 time.sleep(2)
-                
                 out = stdout.read().decode()
                 err = stderr.read().decode()
                 if out or err:
@@ -958,38 +936,29 @@ class GmsTestGUI:
                         self.log_message(f"stderr: {err}")
                 else:
                     self.log_message(f"✅ 设备 {busid} attach 命令已发送")
-            
-            # 等待所有设备稳定
+                time.sleep(2)
+    
             time.sleep(3)
-            
-            # 获取最终端口状态
             stdin, stdout, stderr = ubuntu_ssh.exec_command("sudo usbip port", get_pty=True)
             final_port_info = stdout.read().decode()
             self.log_message(f"📌 最终 USBIP 端口状态:\n{final_port_info}")
-            
+
             attached_devices = []
             device_ip = device_host.split('@')[1]
             port_count = 0
-            
             if "Port" in final_port_info:
-                # 统计端口数量
                 for line in final_port_info.split('\n'):
                     if line.startswith("Port "):
                         port_count += 1
-                
-                # 在整个文本中搜索 usbip:// 信息
-                import re
+
                 # 匹配所有 usbip://IP:端口/busid 格式
                 usbip_pattern = rf'usbip://{re.escape(device_ip)}:\d+/(\d+-\d+)'
                 matches = re.findall(usbip_pattern, final_port_info)
-                
                 for busid_found in matches:
                     if busid_found in self.all_busids and busid_found not in attached_devices:
                         attached_devices.append(busid_found)
-
                 self.log_message(f"✅ Windows电脑{device_ip} 检测到 {port_count} 个 USB/IP 端口")
                 self.log_message(f"🔍 精确匹配到 {len(attached_devices)} 个设备: {', '.join(attached_devices) if attached_devices else '无'}")
-
             self.log_message("⏳ 等待 USB 设备稳定...")
             ubuntu_ssh.exec_command("sleep 2", get_pty=True)
             ubuntu_ssh.exec_command("sudo udevadm trigger", get_pty=True)
@@ -998,81 +967,104 @@ class GmsTestGUI:
 
             if attached_devices:
                 self.log_message(f"🎉 USB/IP 设备接入完成! 共连接 {len(attached_devices)} 个设备: {', '.join(attached_devices)}")
-                self.log_message("请手动[🔄 刷新设备]查看设备列表")
+                self.refresh_devices()
                 self.usbip_connected = True
                 self.root.after(0, lambda: self.usbip_button.config(text="🛑 断开设备"))
                 return True
             else:
                 self.log_message("❌ USB/IP 连接失败")
+                if not usbip_connected_retry:
+                    usbip_connected_retry = True
+                    self.log_message("🔄 尝试重新连接 USB/IP 设备...")
+                    return self._start_usbip_connection()
                 return False
         except Exception as e:
             self.log_message(f"❌ USB/IP 连接失败: {e}")
             return False
 
     def _stop_usbip_connection(self):
-        device_host = self.config.get("device_host", "")
-        if not device_host:
-            return
-        self.log_message("🔌 正在断开本地设备...")
+        if not self.config.get("device_host", ""):
+            self.show_warning("提示", "设备主机未配置")
+            return False
+        self.log_message("🔌 断开本地设备...")
         try:
-            # Windows 端解除绑定
             win_ssh = self.get_device_host_ssh_connection()
             if not win_ssh:
                 self.log_message("❌ 无法连接 Windows 设备主机")
                 return False
-
-            # 解除所有绑定
             self.log_message("🔓 解除所有 USB/IP 绑定...")
             stdin, stdout, stderr = win_ssh.exec_command("usbipd unbind --all", timeout=10)
-            output = stdout.read().decode()
-            error = stderr.read().decode()
-
+            output = stdout.read().decode(errors="replace")
+            error = stderr.read().decode(errors="replace")
             if output:
                 self.log_message(f"📤 unbind 输出: {output}")
             if error:
                 self.log_message(f"📤 unbind 错误: {error}")
             win_ssh.close()
 
-            ssh = self.get_ssh_connection()
-
-            # 先查看当前端口状态
-            stdin, stdout, _ = ssh.exec_command("sudo usbip port", get_pty=True)
-            port_info = stdout.read().decode()
-            self.log_message(f"📌 当前 USBIP 端口状态:\n{port_info}")
-
-            # 断开所有端口
-            import re
-            ports = []
-            for line in port_info.split('\n'):
-                if line.startswith("Port "):
-                    # 提取端口号
-                    match = re.match(r'Port (\d+):', line)
-                    if match:
-                        port_num = match.group(1)
-                        ports.append(port_num)
-
-            if ports:
-                for port in ports:
-                    self.log_message(f"🗑️ Detach USBIP 端口 {port}")
-                    ssh.exec_command(f"sudo usbip detach -p {port}", get_pty=True)
-                self.log_message(f"✅ 已断开 {len(ports)} 个 USB/IP 端口")
-            else:
-                self.log_message("ℹ️ 未发现活动的 USB/IP 端口")
-
-            ssh.close()
-
-            # 清理属性
             if hasattr(self, 'all_busids'):
                 del self.all_busids
-
             self.usbip_connected = False
             self.root.after(0, lambda: self.usbip_button.config(text="📱 本地设备"))
             self.log_message("✅ 本地设备已断开")
 
-            # 刷新设备列表
+            time.sleep(2)
             self.refresh_devices()
         except Exception as e:
             self.log_message(f"⚠️ 本地设备断开失败: {e}")
+
+    def _usbip_ensure_attached_on_ubuntu(self, ssh, device_ip: str, busids: list[str]) -> bool:
+        """
+        确保 busids 在 Ubuntu 已 attach；若已存在映射则先 detach 再 attach（更抗 reboot 后残留会话）
+        """
+        stdin, stdout, _ = ssh.exec_command("sudo usbip port", get_pty=True)
+        port_info = stdout.read().decode(errors="replace")
+        port_map = self._parse_usbip_port_map(port_info, device_ip)
+
+        for busid in busids:
+            # 如果已映射到某个 port，先 detach 再 attach（避免僵尸连接）
+            if busid in port_map:
+                p = port_map[busid]
+                self.log_message(f"🧹 USB/IP: busid {busid} 已在 Port {p}，先 detach")
+                ssh.exec_command(f"sudo usbip detach -p {p}", get_pty=True)
+                time.sleep(1)
+
+            self.log_message(f"🔗 USB/IP: attach busid {busid}")
+            ssh.exec_command(f"sudo usbip attach -r {device_ip} -b {busid}", get_pty=True)
+            time.sleep(1.5)
+            stdin, stdout, _ = ssh.exec_command("sudo usbip port", get_pty=True)
+            port_txt = stdout.read().decode(errors="replace")
+
+            if "Port" not in port_txt:
+                self.log_message("❌ attach 后 usbip port 为空，判定失败")
+                return False
+
+        # udev settle（你 start 里也做了类似处理 :contentReference[oaicite:9]{index=9}）
+        ssh.exec_command("sudo udevadm trigger", get_pty=True)
+        ssh.exec_command("sudo udevadm settle", get_pty=True)
+        return True
+
+    def _parse_usbip_port_map(self, port_info: str, device_ip: str) -> dict:
+        """
+        解析 `usbip port` 输出，得到 {busid: port_num}
+        兼容你在 _start_usbip_connection 里用的 usbip://IP:PORT/BUSID 形式 :contentReference[oaicite:8]{index=8}
+        """
+        mapping = {}
+        # Port 00: <...>
+        #   Remote: usbip://172.16.xx.xx:3240/1-20
+        cur_port = None
+        for line in port_info.splitlines():
+            m = re.match(r"Port\s+(\d+):", line.strip())
+            if m:
+                cur_port = m.group(1)
+                continue
+            if cur_port is not None:
+                # 取 busid
+                m2 = re.search(rf"usbip://{re.escape(device_ip)}:\d+/(\d+-\d+)", line)
+                if m2:
+                    mapping[m2.group(1)] = cur_port
+                    cur_port = None
+        return mapping
 
     # ==================== SSH连接 ====================
     def get_ssh_connection(self, timeout=5):
@@ -2455,25 +2447,36 @@ class GmsTestGUI:
         if not ssh:
             self.log_message("❌ 无法连接到 Ubuntu 主机，跳过进程清理")
             return
-
         try:
-            kill_cmd = "pkill -f tradefed"
-            self.log_message("🧹 正在终止 tradefed 进程...")
+            binary_map = {
+                'cts': 'cts-tradefed',
+                'gsi': 'cts-tradefed',
+                'gts': 'gts-tradefed',
+                'sts': 'sts-tradefed',
+                'vts': 'vts-tradefed',
+                'apts': 'gts-tradefed'
+            }
+            test_type = self.test_type.get().strip().lower()
+            tradefed_bin = binary_map.get(test_type)
+            if not tradefed_bin:
+                self.log_message(f"❌ 未知的测试类型: {test_type}")
+                return
+            kill_cmd = f"pkill -f '[./]?{tradefed_bin}.*run commandAndExit'"
+            self.log_message(f"🧹 正在终止 {test_type.upper()} 测试进程...")
             stdin, stdout, stderr = ssh.exec_command(kill_cmd, timeout=10)
             exit_code = stdout.channel.recv_exit_status()
 
             if exit_code == 0:
-                self.log_message("✅ tradefed 进程已成功终止")
+                self.log_message(f"✅ {test_type.upper()} tradefed 进程已成功终止")
             else:
                 error_output = stderr.read().decode('utf-8').strip()
-                if error_output:
-                    self.log_message(f"⚠️ 终止 tradefed 时出现错误: {error_output}")
-                else:
-                    self.log_message("ℹ️ 未发现正在运行的 tradefed 进程")
-
+                # pkill 返回 1 表示没有进程被杀死，这不是错误
+                if exit_code == 1 or (error_output and "no process found" in error_output.lower()):
+                    self.log_message(f"ℹ️ 未发现正在运行的 {test_type.upper()} 测试进程")
+                elif error_output:
+                    self.log_message(f"⚠️ 终止 {test_type.upper()} 时出现错误: {error_output}")
             time.sleep(1)
             self.refresh_devices()
-
         except Exception as e:
             self.log_message(f"💥 终止 tradefed 进程异常: {e}")
         finally:
