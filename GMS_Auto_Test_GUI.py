@@ -1974,9 +1974,9 @@ class GmsTestGUI:
                 sudo reboot
     5. 启动服务: export DISPLAY=:0 && export XAUTHORITY=/home/hcq/.Xauthority && 
                 x11vnc -display :0 -forever -shared -rfbauth ~/.vnc/passwd -bg
-    6. 启动服务: cd /opt/noVNC && nohup ./utils/websockify/run --web /opt/noVNC 6080 localhost:{vnc_port}
-    7. 本地界面: http://172.16.14.233:6080/vnc.html?autoconnect=true
-    8. 停止服务: pkill -f x11vnc && pkill -f websockify
+                cd /opt/noVNC && nohup ./utils/websockify/run --web /opt/noVNC 6080 localhost:5901
+    6. 本地界面: http://172.16.14.233:6080/vnc.html?autoconnect=true
+    7. 停止服务: pkill -f x11vnc && pkill -f websockify
     """
     def init_and_start_vnc(self):
         if self.vnc_starting:
